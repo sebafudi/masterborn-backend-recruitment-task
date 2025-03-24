@@ -1,5 +1,10 @@
 import sqlite3 from "sqlite3";
 import { Database } from "sqlite";
+import "dotenv/config";
+
+const LEGACY_API_URL = process.env.LEGACY_API_URL;
+const LEGACY_API_KEY = process.env.LEGACY_API_KEY;
+const LEGACY_API_RETRIES = parseInt(process.env.LEGACY_API_RETRIES || "3");
 
 export type RecruitmentStatus =
   | "new"
@@ -198,6 +203,8 @@ export class CandidatesService {
         );
       }
 
+      await this.pushToLegacyApi(candidateData);
+
       await this.db.run("COMMIT");
 
       const dbCandidate = await this.db.get(
@@ -223,6 +230,56 @@ export class CandidatesService {
     } catch (error) {
       await this.db.run("ROLLBACK");
       throw error;
+    }
+  }
+
+  private async pushToLegacyApi(candidateData: Candidate) {
+    let response;
+    for (let attempt = 1; attempt <= LEGACY_API_RETRIES; attempt++) {
+      response = await fetch(`${LEGACY_API_URL}/candidates`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-API-KEY": LEGACY_API_KEY,
+        },
+        body: JSON.stringify({
+          firstName: candidateData.firstName,
+          lastName: candidateData.lastName,
+          email: candidateData.email,
+        }),
+      });
+
+      if (response.ok || response.status === 409) {
+        break;
+      }
+
+      if (response.status === 504 && attempt < LEGACY_API_RETRIES) {
+        await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
+      }
+    }
+
+    if (!response.ok) {
+      if (response.status === 409) {
+        throw new UserServiceError(
+          "Candidate with this email already exists in the legacy system",
+          409
+        );
+      } else if (response.status === 504) {
+        throw new UserServiceError(
+          "Request to the legacy system timed out",
+          504
+        );
+      } else if (response.status === 400) {
+        throw new UserServiceError(
+          "Invalid data sent to the legacy system",
+          400
+        );
+      } else {
+        throw new UserServiceError(
+          "Failed to push candidate to the legacy system",
+          500
+        );
+      }
     }
   }
 
