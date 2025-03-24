@@ -6,3 +6,14 @@ services:
     restart: always
     ports:
       - "4040:4040"
+  new-recruitment-api:
+    build:
+      context: ./new-recruitment-api
+    container_name: new-recruitment-api
+    restart: always
+    ports:
+      - "3000:3000"
+    env_file:
+      - ./new-recruitment-api/.env
+    environment:
+      - LEGACY_API_URL=http://legacy-api:4040
