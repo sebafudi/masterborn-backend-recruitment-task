@@ -17,6 +17,21 @@ export interface Candidate {
   recruitmentStatus?: RecruitmentStatus;
   dateOfConsentForRecruitment?: Date;
   createdAt?: string;
+  jobOffers?: Offer[];
+}
+
+export interface Offer {
+  title: string;
+  description: string;
+  salaryRange: string;
+  location: string;
+}
+
+export interface DbOffer {
+  title: string;
+  description: string;
+  salary_range: string;
+  location: string;
 }
 
 export interface DbCandidate {
@@ -42,7 +57,7 @@ export class CandidatesService {
     private readonly db: Database<sqlite3.Database, sqlite3.Statement>
   ) {}
 
-  private mapToCamelCase(dbObject: DbCandidate): Candidate {
+  private mapCandidateToCamelCase(dbObject: DbCandidate): Candidate {
     return {
       firstName: dbObject.first_name,
       lastName: dbObject.last_name,
@@ -53,6 +68,16 @@ export class CandidatesService {
       recruitmentStatus: dbObject.recruitment_status,
       dateOfConsentForRecruitment: dbObject.date_of_consent_for_recruitment,
       createdAt: dbObject.created_at,
+      jobOffers: [],
+    };
+  }
+
+  private mapOfferToCamelCase(dbObject: DbOffer): Offer {
+    return {
+      title: dbObject.title,
+      description: dbObject.description,
+      salaryRange: dbObject.salary_range,
+      location: dbObject.location,
     };
   }
 
@@ -81,12 +106,25 @@ export class CandidatesService {
         limit,
         offset
       )
-    ).map(this.mapToCamelCase);
+    ).map(this.mapCandidateToCamelCase);
+
+    const candidatesWithJobOffers = await Promise.all(
+      candidates.map(async (candidate) => {
+        const jobOfferIds = await this.db.all(
+          `SELECT * FROM JobOffer WHERE id IN (SELECT job_offer_id FROM CandidateJobOffers WHERE candidate_email = ?)`,
+          candidate.email
+        );
+        return {
+          ...candidate,
+          jobOffers: jobOfferIds.map(this.mapOfferToCamelCase),
+        };
+      })
+    );
 
     const totalPages = Math.ceil(total / limit);
 
     return {
-      data: candidates,
+      data: candidatesWithJobOffers,
       meta: {
         page,
         limit,
@@ -110,38 +148,82 @@ export class CandidatesService {
       throw new UserServiceError("Invalid recruitment status", 422);
     }
 
-    const result = await this.db.run(
-      `INSERT INTO candidate (
-        first_name, 
-        last_name, 
-        email, 
-        phone, 
-        years_of_experience, 
-        additional_recruiter_notes, 
-        recruitment_status,
-        date_of_consent_for_recruitment
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        candidateData.firstName,
-        candidateData.lastName,
-        candidateData.email,
-        candidateData.phone || null,
-        candidateData.yearsOfExperience || null,
-        candidateData.additionalRecruiterNotes || null,
-        candidateData.recruitmentStatus,
-        candidateData.dateOfConsentForRecruitment || null,
-      ]
-    );
+    const jobOffers = await this.db.all(`SELECT id FROM JobOffer`);
 
-    const createdCandidate = await this.db.get(
-      "SELECT * FROM candidate WHERE email = ?",
-      candidateData.email
-    );
+    if (jobOffers.length === 0) {
+      throw new UserServiceError("No job offers available in the system", 500);
+    }
+    const numberOfOffers = Math.floor(Math.random() * 3) + 1; // Random number between 1 and 3
+    const selectedJobOffers = [];
+    const usedIndices = new Set();
 
-    return {
-      message: "Candidate created successfully",
-      candidate: createdCandidate,
-    };
+    while (selectedJobOffers.length < numberOfOffers) {
+      const randomIndex = Math.floor(Math.random() * jobOffers.length);
+      if (!usedIndices.has(randomIndex)) {
+        selectedJobOffers.push(jobOffers[randomIndex]);
+        usedIndices.add(randomIndex);
+      }
+    }
+
+    await this.db.run("BEGIN TRANSACTION");
+
+    try {
+      await this.db.run(
+        `INSERT INTO candidate (
+            first_name, 
+            last_name, 
+            email, 
+            phone, 
+            years_of_experience, 
+            additional_recruiter_notes, 
+            recruitment_status,
+            date_of_consent_for_recruitment
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          candidateData.firstName,
+          candidateData.lastName,
+          candidateData.email,
+          candidateData.phone || null,
+          candidateData.yearsOfExperience || null,
+          candidateData.additionalRecruiterNotes || null,
+          candidateData.recruitmentStatus,
+          candidateData.dateOfConsentForRecruitment || null,
+        ]
+      );
+
+      for (const offer of selectedJobOffers) {
+        await this.db.run(
+          `INSERT INTO CandidateJobOffers (candidate_email, job_offer_id) VALUES (?, ?)`,
+          [candidateData.email, offer.id]
+        );
+      }
+
+      await this.db.run("COMMIT");
+
+      const dbCandidate = await this.db.get(
+        "SELECT * FROM candidate WHERE email = ?",
+        candidateData.email
+      );
+
+      const candidate = this.mapCandidateToCamelCase(dbCandidate);
+
+      const jobOfferIds = await this.db.all(
+        `SELECT * FROM JobOffer WHERE id IN (SELECT job_offer_id FROM CandidateJobOffers WHERE candidate_email = ?)`,
+        candidate.email
+      );
+      const candidateWithJobOffers = {
+        ...candidate,
+        jobOffers: jobOfferIds.map(this.mapOfferToCamelCase),
+      };
+
+      return {
+        message: "Candidate created successfully",
+        candidate: candidateWithJobOffers,
+      };
+    } catch (error) {
+      await this.db.run("ROLLBACK");
+      throw error;
+    }
   }
 
   private async checkForExistingCandidate(candidateData: Candidate) {
